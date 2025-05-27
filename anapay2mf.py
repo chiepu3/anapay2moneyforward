@@ -23,6 +23,9 @@ import quickstart
 import re # For 2FA code regex
 from google.auth.transport.requests import Request as GoogleAuthRequest # For token refresh
 import time
+import json # Added for cookie handling
+import os.path # Added for cookie handling
+# from urllib.parse import urlparse # Not strictly needed for simple domain extraction
 
 
 SCOPES = [
@@ -33,6 +36,7 @@ SCOPES = [
 # Google Spreadsheet ID and Sheet name
 # SHEET_ID is now loaded from environment variables (Subtask 8)
 SHEET_NAME = "ANAPay"
+COOKIE_FILE = "mf_cookies.json" # Cookie file name
 
 MF_URL = "https://moneyforward.com/cf" # Updated in Subtask 1
 
@@ -607,10 +611,55 @@ def login_mf():
     password = os.getenv("PASSWORD")
     login_url = "https://moneyforward.com/users/sign_in" # From Subtask 4
 
-    logging.info(f"Navigating to Money Forward login page: {login_url}")
+    # ブラウザ起動はmain関数で行われるため、ここでは削除
+    # logging.info(f"Navigating to Money Forward login page: {login_url}")
+    # helium.start_firefox() 
+    # helium.go_to(login_url)
+
+    driver = helium.get_driver() 
+    if driver is None:
+        logging.error("Browser not started before calling login_mf. This indicates an issue in the program flow.")
+        # 緊急フォールバックとしてブラウザを起動するが、理想的ではない
+        logging.info("Emergency fallback: Starting browser in login_mf.")
+        helium.start_firefox()
+        # この場合、login_urlへの遷移は次のステップで行う
     
-    helium.start_firefox() 
+    # Cookie読み込み後の最初のページアクセスとしてlogin_urlを使用する
+    # Cookieが有効なら、このアクセスでログイン後のページにリダイレクトされるか、
+    # またはログイン状態がCookieによって認識される。
+    logging.info(f"Navigating to Money Forward login page: {login_url} to check login status / start login.")
     helium.go_to(login_url)
+    time.sleep(2) # ページロードと潜在的なリダイレクトを待つ
+
+    # ログイン状態の確認: MF_URL（家計簿ページ）に直接アクセスしてみて、「手入力」ボタンがないことを確認
+    try:
+        logging.info(f"Attempting to navigate to {MF_URL} to check if already logged in via cookies.")
+        helium.go_to(MF_URL)
+        time.sleep(2) # ページロード待ち
+        if helium.Button("手入力").exists():
+            logging.info("Login required (found '手入力' button on MF_URL). Proceeding with normal login process from login page.")
+            helium.go_to(login_url) # 明示的にログインページから開始
+            time.sleep(1)
+        else:
+            logging.info("Already logged in (did not find '手入力' button on MF_URL). Skipping password login.")
+            # Cookieによりログイン済みと判断。現在のCookieを（更新のために）保存してreturn
+            try:
+                logging.info("Attempting to save (refresh) cookies as login seems successful via cookies.")
+                current_cookies = helium.get_driver().get_cookies()
+                if current_cookies:
+                    with open(COOKIE_FILE, 'w') as f:
+                        json.dump(current_cookies, f, indent=2)
+                    logging.info(f"Successfully saved/refreshed {len(current_cookies)} cookies to '{COOKIE_FILE}'.")
+                else:
+                    logging.warning("No cookies found in the browser to save, though login seemed successful via cookies.")
+            except Exception as e_save_cookie: # Renamed variable to avoid conflict
+                logging.error(f"Error saving cookies after cookie-based login: {e_save_cookie}")
+            return # ログイン処理をスキップ
+
+    except Exception as e_check_login:
+        logging.warning(f"Error during pre-login check to MF_URL: {e_check_login}. Proceeding with normal login from login page.")
+        helium.go_to(login_url) # エラー時はログインページから開始
+        time.sleep(1)
 
     logging.info(f"Attempting to login with email: {email}")
 
@@ -720,6 +769,24 @@ def login_mf():
         else:
             logging.info(f"Already at or beyond MF_URL (Current: '{current_url_before_final_goto}', Target: '{MF_URL}'). Skipping final go_to in login_mf.")
         
+        # Cookie保存処理
+        try:
+            # 現在のURLがMF_URLであることを再度確認してからCookieを保存するのがより安全
+            # final_current_url = helium.get_driver().current_url
+            # if MF_URL in final_current_url: # より厳密には startswith(MF_URL)
+            logging.info("Attempting to save cookies after successful login and navigation...")
+            current_cookies = helium.get_driver().get_cookies()
+            if current_cookies: # Cookieが取得できた場合のみ保存
+                with open(COOKIE_FILE, 'w') as f:
+                    json.dump(current_cookies, f, indent=2)
+                logging.info(f"Successfully saved {len(current_cookies)} cookies to '{COOKIE_FILE}'.")
+            else:
+                logging.warning("No cookies found in the browser to save.")
+            # else:
+            #    logging.warning(f"Not saving cookies as current URL '{final_current_url}' is not the target MF_URL.")
+        except Exception as e_save:
+            logging.error(f"Error saving cookies: {e_save}")
+
         return # This is the main success return for login_mf
 
     except Exception as e:
@@ -838,6 +905,66 @@ def main():
     gc = gspread.oauth(
         credentials_filename="credentials.json", authorized_user_filename="token.json"
     )
+
+    # ブラウザ起動とCookie読み込み
+    logging.info("Starting browser...")
+    helium.start_firefox() # URL指定なし
+
+    if os.path.exists(COOKIE_FILE):
+        logging.info(f"Cookie file '{COOKIE_FILE}' found. Attempting to load cookies.")
+        try:
+            with open(COOKIE_FILE, 'r') as f:
+                cookies_to_load = json.load(f)
+            
+            domain_url = "/".join(MF_URL.split("/")[:3]) # "https://moneyforward.com"
+            
+            logging.info(f"Navigating to domain {domain_url} to set cookies.")
+            helium.go_to(domain_url)
+            time.sleep(1) 
+
+            helium.get_driver().delete_all_cookies()
+            logging.info("Deleted all existing cookies before loading saved ones.")
+
+            for cookie in cookies_to_load:
+                if 'expiry' in cookie and isinstance(cookie['expiry'], float):
+                    cookie['expiry'] = int(cookie['expiry'])
+                
+                valid_samesite_values = ['Strict', 'Lax', 'None']
+                if 'sameSite' in cookie and cookie['sameSite'] not in valid_samesite_values:
+                    logging.warning(f"Cookie '{cookie.get('name')}' has an unsupported sameSite value: '{cookie['sameSite']}'. Removing 'sameSite' attribute.")
+                    del cookie['sameSite']
+
+                try:
+                    helium.get_driver().add_cookie(cookie)
+                except Exception as e_add_cookie:
+                    logging.warning(f"Could not add cookie '{cookie.get('name')}': {e_add_cookie}. Skipping this cookie.")
+            
+            logging.info(f"Successfully attempted to load {len(cookies_to_load)} cookies.")
+            # ログイン状態の確認は login_mf 関数に任せる
+            # logging.info(f"Navigating to MF_URL ({MF_URL}) after loading cookies for verification.")
+            # helium.go_to(MF_URL) 
+            # time.sleep(2)
+        
+        except json.JSONDecodeError as e_decode:
+            logging.error(f"Cookieファイル '{COOKIE_FILE}' が破損しているため読み込めませんでした: {e_decode}")
+            if os.path.exists(COOKIE_FILE):
+                try:
+                    os.remove(COOKIE_FILE)
+                    logging.info(f"破損した可能性のあるCookieファイル '{COOKIE_FILE}' を削除しました。次回正常ログイン時に再作成されます。")
+                except OSError as e_remove:
+                    logging.error(f"破損したCookieファイル '{COOKIE_FILE}' の削除に失敗しました: {e_remove}")
+        except Exception as e_load:
+            logging.error(f"Cookieファイルの読み込み中に予期せぬエラーが発生しました: {e_load}. Proceeding with fresh login attempt.")
+            # 予期せぬエラーの場合も、問題のあるファイルを削除する方が安全かもしれない
+            if os.path.exists(COOKIE_FILE): 
+                try:
+                    os.remove(COOKIE_FILE)
+                    logging.info(f"問題が発生したCookieファイル '{COOKIE_FILE}' を削除しました。")
+                except OSError as e_remove:
+                    logging.error(f"問題が発生したCookieファイル '{COOKIE_FILE}' の削除に失敗しました: {e_remove}")
+    else:
+        logging.info(f"Cookie file '{COOKIE_FILE}' not found. Will attempt fresh login and save cookies on success.")
+
     sheet = gc.open_by_key(SHEET_ID)
     anapay_sheet = sheet.worksheet("ANAPay")
     store_sheet = sheet.worksheet("ANAPayStore")
