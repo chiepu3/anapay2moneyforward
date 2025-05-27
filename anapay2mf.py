@@ -101,8 +101,36 @@ def get_mail_info(res: dict) -> ANAPay | None:
     # ご利用日時：2023-06-28 22:46:19
     # ご利用金額：44,308円
     # ご利用店舗：SMOKEBEERFACTORY OTSUKATE
-    data = res["payload"]["body"]["data"]
-    body = base64.urlsafe_b64decode(data).decode()
+    
+    body_data = None
+    payload = res.get("payload", {})
+    message_id = res.get("id", "N/A") # For logging
+
+    if payload.get("body", {}).get("data"):
+        body_data = payload["body"]["data"]
+    elif payload.get("parts"):
+        for part in payload["parts"]:
+            if part.get("mimeType") == "text/plain" and part.get("body", {}).get("data"):
+                body_data = part["body"]["data"]
+                break
+            elif part.get("mimeType") == "multipart/alternative" and part.get("parts"):
+                for sub_part in part["parts"]:
+                    if sub_part.get("mimeType") == "text/plain" and sub_part.get("body", {}).get("data"):
+                        body_data = sub_part["body"]["data"]
+                        break
+                if body_data: # Found in sub_part
+                    break
+    
+    body = ""
+    if body_data:
+        try:
+            body = base64.urlsafe_b64decode(body_data.encode('ASCII')).decode('utf-8')
+        except Exception as e:
+            logging.error(f"Error decoding body for message ID {message_id}: {e}")
+            # body remains ""
+    else:
+        logging.warning(f"Could not extract body from message ID: {message_id}")
+
     for line in body.splitlines():
         if line.startswith("ご利用"):
             key, value = line.split("：")
@@ -125,8 +153,34 @@ def get_debit_card_mail_info(res: dict) -> ANAPay | None:
             date_str = header["value"].replace(" +0900 (JST)", "")
             ana_pay.email_date = parser.parse(date_str)
 
-    data = res["payload"]["body"]["data"]
-    body = base64.urlsafe_b64decode(data).decode()
+    body_data = None
+    payload = res.get("payload", {})
+    message_id = res.get("id", "N/A") # For logging
+
+    if payload.get("body", {}).get("data"):
+        body_data = payload["body"]["data"]
+    elif payload.get("parts"):
+        for part in payload["parts"]:
+            if part.get("mimeType") == "text/plain" and part.get("body", {}).get("data"):
+                body_data = part["body"]["data"]
+                break
+            elif part.get("mimeType") == "multipart/alternative" and part.get("parts"):
+                for sub_part in part["parts"]:
+                    if sub_part.get("mimeType") == "text/plain" and sub_part.get("body", {}).get("data"):
+                        body_data = sub_part["body"]["data"]
+                        break
+                if body_data: # Found in sub_part
+                    break
+    
+    body = ""
+    if body_data:
+        try:
+            body = base64.urlsafe_b64decode(body_data.encode('ASCII')).decode('utf-8')
+        except Exception as e:
+            logging.error(f"Error decoding body for message ID {message_id}: {e}")
+            # body remains ""
+    else:
+        logging.warning(f"Could not extract body from message ID: {message_id}")
 
     temp_date_of_use_str = None
     temp_store = None
@@ -288,8 +342,9 @@ def gmail2spredsheet(worksheet):
         )
 
     # get last day from records
-    after = get_last_email_date(records)
-    logging.info("Last day on spreadsheet: %s", after)
+    # after = get_last_email_date(records) # 通常はこちらを使用
+    after = "2024/01/01"  # TODO: 過去メール処理用。この日付を処理したいメールの「取得開始日」に書き換えてください (例: "2023/01/01" なら2023年1月1日以降のメールを取得)。
+    logging.info("Last day on spreadsheet (potentially overridden for past email processing): %s", after)
     email_date_set = set(parser.parse(r["email_date"]) for r in records)
 
     # get transaction emails from Gmail
