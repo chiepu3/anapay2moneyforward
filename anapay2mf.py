@@ -600,6 +600,8 @@ def login_mf():
         try:
             helium.wait_until(helium.Button("手入力").exists, timeout_secs=10) 
             logging.info("Successfully logged in (found '手入力' button quickly).")
+            logging.info(f"Navigating to MF_URL ({MF_URL}) after successful login.")
+            helium.go_to(MF_URL)
             return 
         except Exception: 
             logging.info("'手入力' button not found with short timeout. Checking for 2FA page.")
@@ -609,11 +611,15 @@ def login_mf():
                 logging.info("2FA handling complete. Waiting for '手入力' button again with longer timeout.")
                 helium.wait_until(helium.Button("手入力").exists, timeout_secs=30) 
                 logging.info("Successfully logged in after 2FA handling.")
+                logging.info(f"Navigating to MF_URL ({MF_URL}) after successful login with 2FA.")
+                helium.go_to(MF_URL)
                 return 
             else:
                 logging.info("2FA page not detected. Waiting for '手入力' with longer timeout or failing.")
                 helium.wait_until(helium.Button("手入力").exists, timeout_secs=30) 
                 logging.info("Successfully logged in (found '手入力' button after longer wait, no 2FA detected).")
+                logging.info(f"Navigating to MF_URL ({MF_URL}) after successful login (no 2FA).")
+                helium.go_to(MF_URL)
                 return
 
     except Exception as e:
