@@ -27,10 +27,10 @@ SCOPES = [
 ]
 
 # Google Spreadsheet ID and Sheet name
-# SHEET_ID is now loaded from environment variables
+SHEET_ID = "143Ewai1jFlt4d4msZI8fXersf2IErrzTQfFjjrwzOwM"
 SHEET_NAME = "ANAPay"
 
-MF_URL = "https://moneyforward.com/cf"
+MF_URL = "https://ssnb.x.moneyforward.com/cf"
 
 format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 logging.basicConfig(format=format, level=logging.INFO)
@@ -44,15 +44,6 @@ if debit_card_asset_name == DEBIT_CARD_ASSET_NAME_DEFAULT and not os.getenv('DEB
     logging.info(f"DEBIT_CARD_ASSET_NAME is not set, using default: {DEBIT_CARD_ASSET_NAME_DEFAULT}")
 else:
     logging.info(f"Using DEBIT_CARD_ASSET_NAME: {debit_card_asset_name}")
-
-# Load SHEET_ID from environment variable
-SHEET_ID = os.getenv("SHEET_ID")
-if not SHEET_ID:
-    logging.error("SHEET_ID is not set in the environment variables. Please set it in your .env file.")
-    # sys.exit(1) # Or handle the error as appropriate, exiting might be too abrupt if other parts could run
-    # For now, just log an error. The script will likely fail later if SHEET_ID is None.
-else:
-    logging.info(f"Using SHEET_ID from environment: {SHEET_ID}")
 
 
 @dataclass
@@ -269,114 +260,20 @@ def gmail2spredsheet(worksheet):
 
 
 def login_mf():
-    """login moneyforward ME with two-step process"""
+    """login moneyforward sbi"""
 
     email = os.getenv("EMAIL")
     password = os.getenv("PASSWORD")
-    login_url = "https://moneyforward.com/users/sign_in"
 
-    logging.info(f"Navigating to Money Forward login page: {login_url}")
-    
-    helium.start_firefox() 
-    helium.go_to(login_url)
+    # https://selenium-python-helium.readthedocs.io/en/latest/api.html
+    logging.info("Login to moneyfoward")
+    helium.start_firefox(MF_URL)
+    helium.wait_until(helium.Button("ログイン").exists)
+    helium.write(email, into="メールアドレス")
+    helium.write(password, into="パスワード")
+    helium.click("ログイン")
 
-    logging.info(f"Attempting to login with email: {email}")
-
-    try:
-        # Step 1: Enter email and click the first submit button
-        logging.info("Waiting for email field 'メールアドレス' to exist.")
-        helium.wait_until(helium.TextField("メールアドレス").exists, timeout_secs=15)
-        logging.info("Writing email into 'メールアドレス' field.")
-        helium.write(email, into=helium.TextField("メールアドレス"))
-
-        # Attempt to click "Keep me logged in" checkbox on the email page
-        try:
-            logging.info("Attempting to find and click '次回から自動的にログインする' checkbox on email page.")
-            remember_me_checkbox_by_text = helium.CheckBox("次回から自動的にログインする")
-            remember_me_checkbox_by_name = helium.CheckBox(name="mfid_user[session_remember_me]")
-
-            checkbox_found_and_handled = False
-            if remember_me_checkbox_by_text.exists():
-                logging.info(f"Found 'Keep me logged in' checkbox by text: {remember_me_checkbox_by_text}")
-                if not remember_me_checkbox_by_text.is_checked():
-                    logging.info("Clicking 'Keep me logged in' checkbox (found by text).")
-                    helium.click(remember_me_checkbox_by_text)
-                else:
-                    logging.info("'Keep me logged in' checkbox (found by text) is already checked.")
-                checkbox_found_and_handled = True
-            elif remember_me_checkbox_by_name.exists():
-                logging.info(f"Found 'Keep me logged in' checkbox by name attribute: {remember_me_checkbox_by_name}")
-                if not remember_me_checkbox_by_name.is_checked():
-                    logging.info("Clicking 'Keep me logged in' checkbox (found by name).")
-                    helium.click(remember_me_checkbox_by_name)
-                else:
-                    logging.info("'Keep me logged in' checkbox (found by name) is already checked.")
-                checkbox_found_and_handled = True
-            
-            if not checkbox_found_and_handled:
-                logging.info("'Keep me logged in' ('次回から自動的にログインする') checkbox not found on the email page with given selectors.")
-                
-        except Exception as e:
-            logging.warning(f"An error occurred while trying to interact with 'Keep me logged in' checkbox on email page: {e}")
-        
-        # Updated selectors for the first login button (after email submission)
-        first_login_button_selectors = [
-            helium.Button("ログインする"), 
-            helium.S("#submitto"), 
-            helium.S('input[type="submit"][value="上記に同意してメールアドレスでログイン"]'),
-            helium.S('input[type="submit"][value="同意してメールアドレスを登録"]'),
-            helium.S('input[type="submit"].btn.btn-primary.btn-block')
-        ]
-        
-        clicked_first_button = False
-        for selector in first_login_button_selectors:
-            if selector.exists():
-                logging.info(f"Found first login button with selector: {selector}")
-                helium.click(selector)
-                clicked_first_button = True
-                break
-        if not clicked_first_button:
-            logging.error("Could not find the first login button (after email submission).")
-            raise Exception("First login button not found after email submission.")
-
-        logging.info("Email submitted. Waiting for password page to load (expecting 'パスワード' field).")
-        helium.wait_until(helium.TextField("パスワード").exists, timeout_secs=15) # Crucial wait for page transition
-        
-        # Step 2: Enter password and click the second submit button
-        logging.info("Writing password into 'パスワード' field.")
-        helium.write(password, into=helium.TextField("パスワード"))
-        
-        # Updated selectors for the second login button (on the password page)
-        second_login_button_selectors = [
-            helium.Button("ログインする"),
-            helium.S("#submitto"),
-            helium.S('input[type="submit"][value="ログインする"].btn.btn-primary.btn-block'),
-            helium.S('input[type="submit"][value="ログインする"]')
-        ]
-        
-        clicked_second_button = False
-        for selector in second_login_button_selectors:
-            if selector.exists():
-                logging.info(f"Found second login button with selector: {selector}")
-                helium.click(selector)
-                clicked_second_button = True
-                break
-        if not clicked_second_button:
-            logging.error("Could not find the second login button (after password submission).")
-            raise Exception("Second login button not found after password submission.")
-
-        logging.info("Password submitted. Waiting for main page content (手入力 button).")
-        
-        # Wait for an element that indicates successful login and page load to https://moneyforward.com/cf
-        # (where the "手入力" button is expected).
-        helium.wait_until(helium.Button("手入力").exists, timeout_secs=30) # Kept 30s for final load
-        logging.info("Successfully logged into Money Forward ME and found '手入力' button.")
-
-    except Exception as e:
-        logging.error(f"An error occurred during login: {e}")
-        logging.info("Browser was running or an error occurred during login, attempting to close it.")
-        helium.kill_browser() # Ensure browser is closed on error
-        raise # Re-raise the exception so the main script knows login failed.
+    helium.wait_until(helium.Button("手入力").exists)
 
 
 def add_mf_record(dt: datetime, amount: int, store: str, asset_name: str, store_info: dict | None):
