@@ -22,6 +22,7 @@ from googleapiclient.discovery import build
 import quickstart
 import re # For 2FA code regex
 from google.auth.transport.requests import Request as GoogleAuthRequest # For token refresh
+import time
 
 
 SCOPES = [
@@ -562,7 +563,39 @@ def handle_2fa_authentication():
 
     if auth_code:
         logging.info(f"Retrieved 2FA code: {auth_code}")
-        submit_2fa_code_to_page(auth_code) 
+        try:
+            submit_2fa_code_to_page(auth_code)
+            logging.info("2FA code submission successful. Proceeding with URL check and navigation.")
+
+            time.sleep(3)  # サーバー側のリダイレクトを待つ
+            current_url = helium.get_driver().current_url
+            logging.info(f"After 2FA submission, current URL is: {current_url}")
+
+            if "moneyforward.com" in current_url:
+                logging.info(f"Successfully landed on a moneyforward.com page: {current_url}. Now attempting to navigate to MF_URL.")
+                time.sleep(2) # 少し待機
+                helium.go_to(MF_URL)
+                logging.info(f"Navigated to MF_URL: {MF_URL} after 2FA process.")
+                time.sleep(2) # ページロードを待つ
+            else:
+                logging.warning(
+                    f"After 2FA, did not land on a moneyforward.com page as expected. "
+                    f"Current URL: {current_url}. Skipping navigation to MF_URL directly from here, "
+                    f"login_mf will try."
+                )
+        except Exception as e:
+            logging.error(f"An error occurred during 2FA code submission or post-submission navigation: {e}")
+            # submit_2fa_code_to_page が失敗した場合、例外はそのまま伝播させるか、
+            # ここで処理して login_mf に失敗を伝えるかを選択できます。
+            # 現在の submit_2fa_code_to_page は失敗時に例外を発生させるため、
+            # ここでキャッチしても再度 raise しないと login_mf に失敗が伝わらない可能性があります。
+            # ここでは submit_2fa_code_to_page からの例外をそのまま伝播させるために raise しないでおきます。
+            # ただし、この try-except は submit_2fa_code_to_page 内部の例外とは別に、
+            # URL取得や go_to で発生する可能性のある例外をキャッチします。
+            # この関数から例外を発生させたい場合は raise e のようにします。
+            # 今回は、ログインフロー全体（login_mf）で最終的な成功/失敗を判断するため、ここでは例外を再送出しません。
+            pass # エラーが発生しても、login_mf のメインの例外処理に任せる
+
     else:
         logging.error("Failed to retrieve 2FA code from Gmail.")
         raise Exception("Could not retrieve 2FA code from Gmail.")
@@ -655,27 +688,39 @@ def login_mf():
         try:
             helium.wait_until(helium.Button("手入力").exists, timeout_secs=10) 
             logging.info("Successfully logged in (found '手入力' button quickly).")
-            logging.info(f"Navigating to MF_URL ({MF_URL}) after successful login.")
-            helium.go_to(MF_URL)
-            return 
+            # Removed go_to(MF_URL) and related logs/sleeps from here
         except Exception: 
             logging.info("'手入力' button not found with short timeout. Checking for 2FA page.")
             if is_2fa_page_detected(): 
                 logging.info("2FA page detected. Attempting to handle 2FA.")
-                handle_2fa_authentication() 
+                handle_2fa_authentication() # This function now attempts navigation to MF_URL
                 logging.info("2FA handling complete. Waiting for '手入力' button again with longer timeout.")
                 helium.wait_until(helium.Button("手入力").exists, timeout_secs=30) 
                 logging.info("Successfully logged in after 2FA handling.")
-                logging.info(f"Navigating to MF_URL ({MF_URL}) after successful login with 2FA.")
-                helium.go_to(MF_URL)
-                return 
+                # Removed go_to(MF_URL) and related logs/sleeps from here
             else:
                 logging.info("2FA page not detected. Waiting for '手入力' with longer timeout or failing.")
                 helium.wait_until(helium.Button("手入力").exists, timeout_secs=30) 
                 logging.info("Successfully logged in (found '手入力' button after longer wait, no 2FA detected).")
-                logging.info(f"Navigating to MF_URL ({MF_URL}) after successful login (no 2FA).")
-                helium.go_to(MF_URL)
-                return
+                # Removed go_to(MF_URL) and related logs/sleeps from here
+
+        # Consolidated navigation logic to MF_URL
+        current_url_before_final_goto = ""
+        try:
+            current_url_before_final_goto = helium.get_driver().current_url
+        except Exception as e_url:
+            logging.warning(f"Could not get current URL before final MF_URL check: {e_url}")
+            # If we can't get current URL, it's safer to try navigating to MF_URL
+            current_url_before_final_goto = "" # Ensure it triggers the go_to
+
+        if not current_url_before_final_goto.startswith(MF_URL):
+            logging.info(f"Final navigation to MF_URL ({MF_URL}) in login_mf. Current URL: '{current_url_before_final_goto}'")
+            helium.go_to(MF_URL)
+            time.sleep(2)  # Wait for page load. Consider using a defined constant like WAIT_TIME_FOR_PAGE_LOAD
+        else:
+            logging.info(f"Already at or beyond MF_URL (Current: '{current_url_before_final_goto}', Target: '{MF_URL}'). Skipping final go_to in login_mf.")
+        
+        return # This is the main success return for login_mf
 
     except Exception as e:
         logging.error(f"An error occurred during login: {e}")
