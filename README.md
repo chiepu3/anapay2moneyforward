@@ -28,6 +28,7 @@
         ```dotenv
         EMAIL="マネーフォワードのログインメールアドレス"
         PASSWORD="マネーフォワードのログインパスワード"
+        SHEET_ID="ここに取得したスプレッドシートIDを貼り付け"
         DEBIT_CARD_ASSET_NAME="Money Forward上のデビットカードの資産名"
         ```
     *   `DEBIT_CARD_ASSET_NAME` はオプションです。設定しない場合、デフォルト値「住信SBIネット銀行 V NEO支店」が使用されます。Money Forwardに登録されているご自身のデビットカードの正確な資産名（例：「〇〇銀行デビット」、「デビットカード（XXXX）」など）を指定してください。
@@ -58,12 +59,9 @@
 ### 3. Googleスプレッドシートの準備
 
 1.  **新しいスプレッドシートの作成:** Googleドライブで新しいスプレッドシートを作成します。
-2.  **スクリプトへのID設定:**
+2.  **スプレッドシートIDの取得と設定:**
     *   作成したスプレッドシートのURLは `https://docs.google.com/spreadsheets/d/SPREADSHEET_ID/edit#gid=0` のような形式になっています。この `SPREADSHEET_ID` の部分をコピーします。
-    *   `anapay2mf.py` ファイルを開き、冒頭付近にある `SHEET_ID` の値を、コピーしたご自身のスプレッドシートIDに書き換えます。
-        ```python
-        SHEET_ID = "ここに取得したスプレッドシートIDを貼り付け"
-        ```
+    *   コピーした `SPREADSHEET_ID` を、先に説明した `.env` ファイル内の `SHEET_ID` 環境変数に設定します。
 3.  **シートの作成とヘッダー設定:**
     *   **`ANAPay` シート:**
         *   1つ目のシート名を `ANAPay` に変更します。
