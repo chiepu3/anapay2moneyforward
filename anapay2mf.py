@@ -125,25 +125,63 @@ def get_debit_card_mail_info(res: dict) -> ANAPay | None:
             date_str = header["value"].replace(" +0900 (JST)", "")
             ana_pay.email_date = parser.parse(date_str)
 
-    # 本文から日時、金額、店舗を取り出す
-    # ご利用日時：2023/11/20 12:00:00
-    # ご利用加盟店：テスト加盟店
-    # 引落金額：1,234.00
     data = res["payload"]["body"]["data"]
     body = base64.urlsafe_b64decode(data).decode()
-    for line in body.splitlines():
-        if line.startswith("ご利用日時："):
-            _, value = line.split("：", 1)
-            ana_pay.date_of_use = parser.parse(value)
-        elif line.startswith("ご利用加盟店："):
-            _, value = line.split("：", 1)
-            ana_pay.store = value
-        elif line.startswith("引落金額："):
-            _, value = line.split("：", 1)
-            ana_pay.amount = int(float(value.replace(",", "")))
 
+    temp_date_of_use_str = None
+    temp_store = None
+    temp_amount_str = None
+
+    for line in body.splitlines():
+        line = line.strip() # 行頭・行末の空白を除去
+        # 利用日時   ： YYYY/MM/DD HH:MM:SS
+        match_date = re.match(r"利用日時\s*：\s*(.*)", line)
+        if match_date:
+            temp_date_of_use_str = match_date.group(1).strip()
+            continue
+
+        # 利用加盟店 ： ACTUAL STORE NAME
+        match_store = re.match(r"利用加盟店\s*：\s*(.*)", line)
+        if match_store:
+            temp_store = match_store.group(1).strip()
+            continue
+
+        # 引落金額   ： N,NNN.NN
+        match_amount = re.match(r"引落金額\s*：\s*(.*)", line)
+        if match_amount:
+            temp_amount_str = match_amount.group(1).strip()
+            continue
+    
+    # Check if all necessary information was found
+    if not temp_date_of_use_str or not temp_store or not temp_amount_str:
+        logging.warning(
+            f"Could not extract all required fields for debit card email. "
+            f"Date: {temp_date_of_use_str}, Store: {temp_store}, Amount: {temp_amount_str}"
+        )
+        return None
+
+    try:
+        # Parse date_of_use
+        ana_pay.date_of_use = datetime.strptime(temp_date_of_use_str, "%Y/%m/%d %H:%M:%S")
+        
+        # Set store
+        ana_pay.store = temp_store
+        
+        # Parse amount
+        ana_pay.amount = int(float(temp_amount_str.replace(",", "")))
+
+    except ValueError as e:
+        logging.error(f"Error parsing debit card mail info: {e}. Date: '{temp_date_of_use_str}', Amount: '{temp_amount_str}'")
+        return None
+
+    # Ensure amount is positive, though this might be redundant if it's always an expense
     if ana_pay.date_of_use and ana_pay.store and ana_pay.amount > 0:
         return ana_pay
+    
+    logging.warning(
+        f"Debit card transaction info seems incomplete or invalid after parsing. "
+        f"Date: {ana_pay.date_of_use}, Store: {ana_pay.store}, Amount: {ana_pay.amount}"
+    )
     return None
 
 
@@ -157,7 +195,7 @@ def get_transaction_emails(after: str) -> list[ANAPay]:
 
     queries = {
         "anapay": f"from:payinfo@121.ana.co.jp subject:ご利用のお知らせ after:{after}",
-        "debit": f"from:post_master@netbk.co.jp subject:デビットカードのご利用がありました。 after:{after}",
+        "debit": f"from:post_master@netbk.co.jp subject:(【デビットカード】ご利用のお知らせ(住信SBIネット銀行)) after:{after}",
     }
 
     all_messages_ids = []
@@ -395,61 +433,73 @@ def is_2fa_page_detected() -> bool:
 
 def submit_2fa_code_to_page(auth_code: str):
     logging.info(f"Attempting to submit 2FA code '{auth_code}' to the page.")
-    
+
+    # Define selectors for OTP input field
     otp_input_field_selectors = [
-        helium.S("#email_otp"), # Preferred, using ID
-        helium.TextField("000000") # Fallback, using placeholder
+        helium.S("#email_otp"),  # Preferred, using ID
+        helium.TextField("000000")  # Fallback, using placeholder
     ]
 
+    # Define selectors for submit button
     submit_button_selectors = [
-        helium.Button("認証する"), # Preferred, using text
-        helium.S("#submitto")    # Fallback, using ID
+        helium.Button("認証する"),  # Preferred, using text
+        helium.S("#submitto")  # Fallback, using ID
     ]
 
-    # Input the 2FA code
+    # Attempt to find and write to the OTP input field
     input_field_found_and_written = False
     for selector in otp_input_field_selectors:
-        if selector.exists(): # Check if element exists
+        if selector.exists():
             logging.info(f"Found 2FA input field with selector: {selector}")
             try:
                 # Attempt to click the field first to ensure focus, especially if using S() selector
+                # This check ensures that we are dealing with an input element before trying to click it.
                 if isinstance(selector, helium.S):
-                    if helium.get_driver().find_element(*selector.internal_selector_value).tag_name == 'input':
-                        helium.click(selector) # Click to focus
+                    # Make sure get_driver() is available and the element is an input tag
+                    try:
+                        element = helium.get_driver().find_element(*selector.internal_selector_value)
+                        if element.tag_name.lower() == 'input':
+                            helium.click(selector)  # Click to focus
+                        else:
+                            logging.debug(f"Selector {selector} points to a non-input element '{element.tag_name}'. Skipping pre-click.")
+                    except Exception as e_click_check:
+                        # Handle cases where the element might not be immediately clickable or interactable
+                        logging.warning(f"Could not perform pre-click check for selector {selector}: {e_click_check}. Proceeding to write.")
                 
                 helium.write(auth_code, into=selector)
                 logging.info(f"Successfully wrote 2FA code into field using selector: {selector}")
                 input_field_found_and_written = True
-                break # Exit loop once successfully written
+                break  # Exit loop once successfully written
             except Exception as e_write:
                 logging.warning(f"Error writing to 2FA input field with selector {selector}: {e_write}. Trying next selector.")
         else:
             logging.debug(f"2FA input field selector not found: {selector}")
-    
+
     if not input_field_found_and_written:
         logging.error("Could not find or write to the 2FA code input field on the page using available selectors.")
         raise Exception("2FA code input field not found or could not be written to.")
 
-    # Click the submit button
+    # Attempt to find and click the submit button
     submit_button_found_and_clicked = False
     for selector in submit_button_selectors:
-        if selector.exists(): # Check if element exists
+        if selector.exists():
             logging.info(f"Found 2FA submit button with selector: {selector}")
             try:
                 helium.click(selector)
                 logging.info(f"Successfully clicked 2FA submit button using selector: {selector}")
                 submit_button_found_and_clicked = True
-                break # Exit loop once successfully clicked
+                break  # Exit loop once successfully clicked
             except Exception as e_click:
                 logging.warning(f"Error clicking 2FA submit button with selector {selector}: {e_click}. Trying next selector.")
         else:
             logging.debug(f"2FA submit button selector not found: {selector}")
-            
+
     if not submit_button_found_and_clicked:
         logging.error("Could not find or click the 2FA submit button on the page using available selectors.")
         raise Exception("2FA submit button not found or could not be clicked.")
-        
+
     logging.info("2FA code submitted successfully.")
+
 
 def handle_2fa_authentication():
     logging.info("Attempting to fetch 2FA code from Gmail for 2FA handling.")

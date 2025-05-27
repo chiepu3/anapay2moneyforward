@@ -107,6 +107,135 @@ class TestEmailParsers(unittest.TestCase):
         self.assertEqual(result.transaction_type, "ANAPay")
         self.assertEqual(result.asset_name, "ANA Pay")
 
+    def test_get_debit_card_mail_info_new_format_strict_spaces(self):
+        """テスト: get_debit_card_mail_info 新フォーマット (TODO記載の厳密なスペース)"""
+        body_text = """（前略）
+利用日時　：　2024/03/15 10:30:00
+利用加盟店　：　テストストア厳密
+引落金額　：　1,234.00
+（後略）"""
+        encoded_body = base64.urlsafe_b64encode(body_text.encode('utf-8')).decode('ascii')
+        mock_res = {
+            "payload": {
+                "headers": [{"name": "Date", "value": "Fri, 15 Mar 2024 10:35:00 +0900 (JST)"}],
+                "body": {"data": encoded_body}
+            }
+        }
+        result = get_debit_card_mail_info(mock_res)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.email_date, datetime(2024, 3, 15, 10, 35, 0))
+        self.assertEqual(result.date_of_use, datetime(2024, 3, 15, 10, 30, 0))
+        self.assertEqual(result.amount, 1234)
+        self.assertEqual(result.store, "テストストア厳密")
+        self.assertEqual(result.transaction_type, "DebitCard")
+        self.assertEqual(result.asset_name, anapay2mf.debit_card_asset_name) # グローバル変数を使用
+
+    def test_get_debit_card_mail_info_new_format_minimal_spaces(self):
+        """テスト: get_debit_card_mail_info 新フォーマット (最小限のスペース)"""
+        body_text = """（前略）
+利用日時：2024/03/15 11:00:00
+利用加盟店：テストストア最小スペース
+引落金額：500.00
+（後略）"""
+        encoded_body = base64.urlsafe_b64encode(body_text.encode('utf-8')).decode('ascii')
+        mock_res = {
+            "payload": {
+                "headers": [{"name": "Date", "value": "Fri, 15 Mar 2024 11:05:00 +0900 (JST)"}],
+                "body": {"data": encoded_body}
+            }
+        }
+        result = get_debit_card_mail_info(mock_res)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.date_of_use, datetime(2024, 3, 15, 11, 0, 0))
+        self.assertEqual(result.amount, 500)
+        self.assertEqual(result.store, "テストストア最小スペース")
+
+    def test_get_debit_card_mail_info_invalid_date_format(self):
+        """テスト: get_debit_card_mail_info 不正な日付フォーマット"""
+        body_text = "利用日時　：　2024-03-15 10:30:00\n利用加盟店　：　テストストア\n引落金額　：　1,234.00"
+        encoded_body = base64.urlsafe_b64encode(body_text.encode('utf-8')).decode('ascii')
+        mock_res = {
+            "payload": {
+                "headers": [{"name": "Date", "value": "Fri, 15 Mar 2024 10:35:00 +0900 (JST)"}],
+                "body": {"data": encoded_body}
+            }
+        }
+        result = get_debit_card_mail_info(mock_res)
+        self.assertIsNone(result)
+
+    def test_get_debit_card_mail_info_invalid_amount_format(self):
+        """テスト: get_debit_card_mail_info 不正な金額フォーマット"""
+        body_text = "利用日時　：　2024/03/15 10:30:00\n利用加盟店　：　テストストア\n引落金額　：　ABC.00"
+        encoded_body = base64.urlsafe_b64encode(body_text.encode('utf-8')).decode('ascii')
+        mock_res = {
+            "payload": {
+                "headers": [{"name": "Date", "value": "Fri, 15 Mar 2024 10:35:00 +0900 (JST)"}],
+                "body": {"data": encoded_body}
+            }
+        }
+        result = get_debit_card_mail_info(mock_res)
+        self.assertIsNone(result)
+
+    def test_get_debit_card_mail_info_missing_store(self):
+        """テスト: get_debit_card_mail_info 店舗名欠損"""
+        body_text = "利用日時　：　2024/03/15 10:30:00\n引落金額　：　1,234.00"
+        encoded_body = base64.urlsafe_b64encode(body_text.encode('utf-8')).decode('ascii')
+        mock_res = {
+            "payload": {
+                "headers": [{"name": "Date", "value": "Fri, 15 Mar 2024 10:35:00 +0900 (JST)"}],
+                "body": {"data": encoded_body}
+            }
+        }
+        result = get_debit_card_mail_info(mock_res)
+        self.assertIsNone(result)
+    
+    def test_get_debit_card_mail_info_amount_zero(self):
+        """テスト: get_debit_card_mail_info 金額が0"""
+        body_text = """利用日時　：　2024/03/15 10:30:00
+利用加盟店　：　テストストアゼロ
+引落金額　：　0.00"""
+        encoded_body = base64.urlsafe_b64encode(body_text.encode('utf-8')).decode('ascii')
+        mock_res = {
+            "payload": {
+                "headers": [{"name": "Date", "value": "Fri, 15 Mar 2024 10:35:00 +0900 (JST)"}],
+                "body": {"data": encoded_body}
+            }
+        }
+        result = get_debit_card_mail_info(mock_res)
+        # Current implementation returns None if amount is not > 0
+        self.assertIsNone(result) 
+
+    def test_get_debit_card_mail_info_extra_lines_and_info(self):
+        """テスト: get_debit_card_mail_info 余分な行や情報があっても抽出できるか"""
+        body_text = """
+これはテストメールです。
+-------------------------
+【取引情報】
+承認番号   ： 987654
+利用日時   ： 2025/12/24 18:00:00
+これは途中の行です。
+利用加盟店 ： クリスマスストア
+引落通貨   ： JPY
+引落金額   ： 5,000.00
+備考       ： プレゼント代
+-------------------------
+ありがとうございました。
+"""
+        encoded_body = base64.urlsafe_b64encode(body_text.encode('utf-8')).decode('ascii')
+        mock_res = {
+            "payload": {
+                "headers": [{"name": "Date", "value": "Tue, 24 Dec 2025 18:05:00 +0900 (JST)"}],
+                "body": {"data": encoded_body}
+            }
+        }
+        result = get_debit_card_mail_info(mock_res)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.email_date, datetime(2025, 12, 24, 18, 5, 0))
+        self.assertEqual(result.date_of_use, datetime(2025, 12, 24, 18, 0, 0))
+        self.assertEqual(result.amount, 5000)
+        self.assertEqual(result.store, "クリスマスストア")
+        self.assertEqual(result.transaction_type, "DebitCard")
+
 
 if __name__ == '__main__':
     unittest.main()
