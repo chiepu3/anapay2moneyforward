@@ -20,6 +20,9 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
 import quickstart
+import re # For 2FA code regex
+from google.auth.transport.requests import Request as GoogleAuthRequest # For token refresh
+
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
@@ -27,10 +30,10 @@ SCOPES = [
 ]
 
 # Google Spreadsheet ID and Sheet name
-SHEET_ID = "143Ewai1jFlt4d4msZI8fXersf2IErrzTQfFjjrwzOwM"
+# SHEET_ID is now loaded from environment variables (Subtask 8)
 SHEET_NAME = "ANAPay"
 
-MF_URL = "https://ssnb.x.moneyforward.com/cf"
+MF_URL = "https://moneyforward.com/cf" # Updated in Subtask 1
 
 format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 logging.basicConfig(format=format, level=logging.INFO)
@@ -44,6 +47,13 @@ if debit_card_asset_name == DEBIT_CARD_ASSET_NAME_DEFAULT and not os.getenv('DEB
     logging.info(f"DEBIT_CARD_ASSET_NAME is not set, using default: {DEBIT_CARD_ASSET_NAME_DEFAULT}")
 else:
     logging.info(f"Using DEBIT_CARD_ASSET_NAME: {debit_card_asset_name}")
+
+# Load SHEET_ID from environment variable (Subtask 8)
+SHEET_ID = os.getenv("SHEET_ID")
+if not SHEET_ID:
+    logging.error("SHEET_ID is not set in the environment variables. Please set it in your .env file.")
+else:
+    logging.info(f"Using SHEET_ID from environment: {SHEET_ID}")
 
 
 @dataclass
@@ -259,21 +269,308 @@ def gmail2spredsheet(worksheet):
     logging.info("Records added to spreadsheet: %d", added_count)
 
 
+def fetch_latest_mf_2fa_code_from_gmail(minutes_ago: int = 10) -> str | None:
+    logging.info(f"Attempting to fetch Money Forward 2FA code from Gmail (last {minutes_ago}m).")
+    creds = None
+    token_path = Path('token.json')
+
+    try:
+        if token_path.exists():
+            creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+    except Exception as e:
+        logging.error(f"Error loading token.json: {e}. Will attempt quickstart.")
+
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            logging.info("Gmail token is expired, attempting to refresh.")
+            try:
+                creds.refresh(GoogleAuthRequest()) 
+                with token_path.open('w') as token_file: 
+                    token_file.write(creds.to_json())
+                logging.info("Gmail token refreshed and saved.")
+            except RefreshError as e_refresh:
+                logging.error(f"Failed to refresh token: {e_refresh}. Attempting to re-run quickstart.")
+                if token_path.exists():
+                    token_path.unlink(missing_ok=True)
+                try:
+                    quickstart.main()
+                    if token_path.exists():
+                        creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+                except Exception as e_qs_refresh:
+                    logging.error(f"Failed to generate token via quickstart after refresh failure: {e_qs_refresh}")
+                    return None
+        else: 
+            logging.info("No valid Gmail credentials or cannot refresh. Attempting to re-run quickstart.")
+            if token_path.exists():
+                token_path.unlink(missing_ok=True)
+            try:
+                quickstart.main()
+                if token_path.exists():
+                    creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+            except Exception as e_qs_final:
+                logging.error(f"Failed to generate token via quickstart: {e_qs_final}")
+                return None
+    
+    if not creds or not creds.valid: 
+        logging.error("Unable to obtain valid Gmail credentials after all attempts.")
+        return None
+
+    try:
+        service = build('gmail', 'v1', credentials=creds)
+        
+        query_parts = [
+            "from:do_not_reply@moneyforward.com",
+            "subject:(マネーフォワード ID メールによる追加認証)", 
+            f"newer_than:{minutes_ago}m"
+        ]
+        query = " ".join(query_parts)
+        logging.info(f"Searching Gmail with query: {query}")
+
+        results = service.users().messages().list(userId='me', q=query, maxResults=1).execute()
+        messages = results.get('messages', [])
+
+        if not messages:
+            logging.info("No 2FA email found matching the criteria.")
+            return None
+
+        msg_id = messages[0]['id']
+        logging.info(f"Found potential 2FA email with ID: {msg_id}")
+        msg_detail = service.users().messages().get(userId='me', id=msg_id, format='full').execute()
+        
+        payload = msg_detail.get('payload', {})
+        data = None
+        
+        parts_to_check = [payload] 
+        if 'parts' in payload:
+            parts_to_check.extend(payload['parts'])
+            for part_level1 in payload['parts']:
+                if 'parts' in part_level1:
+                    parts_to_check.extend(part_level1['parts'])
+
+        for part_type_preference in ['text/plain', 'text/html']:
+            for part_candidate in parts_to_check:
+                if part_candidate.get('mimeType') == part_type_preference and 'body' in part_candidate and 'data' in part_candidate['body']:
+                    data = part_candidate['body']['data']
+                    logging.info(f"Found {part_type_preference} part for 2FA email.")
+                    break
+            if data:
+                break
+        
+        if not data:
+            logging.warning(f"Could not extract text body data (text/plain or text/html) from message ID {msg_id}.")
+            return None
+
+        body = base64.urlsafe_b64decode(data).decode('utf-8', errors='replace')
+        
+        match = re.search(r"こちらのコードを入力してログインを継続してください。\s*(\d{6})", body)
+        
+        if match:
+            auth_code = match.group(1)
+            logging.info(f"Extracted 2FA code: {auth_code}")
+            return auth_code
+        else:
+            logging.warning(f"Could not find 2FA code in email body for message ID {msg_id}. Body (first 500 chars): {body[:500]}")
+            return None
+
+    except Exception as e:
+        logging.error(f"Error fetching/processing 2FA code from Gmail: {e}")
+        return None
+
+def is_2fa_page_detected() -> bool:
+    logging.info("Checking for 2FA page indicators...")
+    heading_exists = helium.S("//h1[contains(text(),'追加認証のお願い')]").exists()
+    if heading_exists:
+        logging.info("Found 2FA page heading '追加認証のお願い'.")
+    
+    otp_input_exists = helium.S("input#email_otp").exists()
+    if otp_input_exists:
+        logging.info("Found OTP input field with id 'email_otp'.")
+
+    if heading_exists and otp_input_exists:
+        logging.info("Confirmed 2FA page based on heading and OTP input field.")
+        return True
+    
+    logging.info("Did not find conclusive 2FA page indicators based on refined checks.")
+    return False
+
+def submit_2fa_code_to_page(auth_code: str):
+    logging.info(f"Attempting to submit 2FA code '{auth_code}' to the page.")
+    
+    otp_input_field_selectors = [
+        helium.S("#email_otp"), # Preferred, using ID
+        helium.TextField("000000") # Fallback, using placeholder
+    ]
+
+    submit_button_selectors = [
+        helium.Button("認証する"), # Preferred, using text
+        helium.S("#submitto")    # Fallback, using ID
+    ]
+
+    # Input the 2FA code
+    input_field_found_and_written = False
+    for selector in otp_input_field_selectors:
+        if selector.exists(): # Check if element exists
+            logging.info(f"Found 2FA input field with selector: {selector}")
+            try:
+                # Attempt to click the field first to ensure focus, especially if using S() selector
+                if isinstance(selector, helium.S):
+                    if helium.get_driver().find_element(*selector.internal_selector_value).tag_name == 'input':
+                        helium.click(selector) # Click to focus
+                
+                helium.write(auth_code, into=selector)
+                logging.info(f"Successfully wrote 2FA code into field using selector: {selector}")
+                input_field_found_and_written = True
+                break # Exit loop once successfully written
+            except Exception as e_write:
+                logging.warning(f"Error writing to 2FA input field with selector {selector}: {e_write}. Trying next selector.")
+        else:
+            logging.debug(f"2FA input field selector not found: {selector}")
+    
+    if not input_field_found_and_written:
+        logging.error("Could not find or write to the 2FA code input field on the page using available selectors.")
+        raise Exception("2FA code input field not found or could not be written to.")
+
+    # Click the submit button
+    submit_button_found_and_clicked = False
+    for selector in submit_button_selectors:
+        if selector.exists(): # Check if element exists
+            logging.info(f"Found 2FA submit button with selector: {selector}")
+            try:
+                helium.click(selector)
+                logging.info(f"Successfully clicked 2FA submit button using selector: {selector}")
+                submit_button_found_and_clicked = True
+                break # Exit loop once successfully clicked
+            except Exception as e_click:
+                logging.warning(f"Error clicking 2FA submit button with selector {selector}: {e_click}. Trying next selector.")
+        else:
+            logging.debug(f"2FA submit button selector not found: {selector}")
+            
+    if not submit_button_found_and_clicked:
+        logging.error("Could not find or click the 2FA submit button on the page using available selectors.")
+        raise Exception("2FA submit button not found or could not be clicked.")
+        
+    logging.info("2FA code submitted successfully.")
+
+def handle_2fa_authentication():
+    logging.info("Attempting to fetch 2FA code from Gmail for 2FA handling.")
+    auth_code = fetch_latest_mf_2fa_code_from_gmail()
+
+    if auth_code:
+        logging.info(f"Retrieved 2FA code: {auth_code}")
+        submit_2fa_code_to_page(auth_code) 
+    else:
+        logging.error("Failed to retrieve 2FA code from Gmail.")
+        raise Exception("Could not retrieve 2FA code from Gmail.")
+
 def login_mf():
-    """login moneyforward sbi"""
+    """login moneyforward ME with two-step process"""
 
     email = os.getenv("EMAIL")
     password = os.getenv("PASSWORD")
+    login_url = "https://moneyforward.com/users/sign_in" # From Subtask 4
 
-    # https://selenium-python-helium.readthedocs.io/en/latest/api.html
-    logging.info("Login to moneyfoward")
-    helium.start_firefox(MF_URL)
-    helium.wait_until(helium.Button("ログイン").exists)
-    helium.write(email, into="メールアドレス")
-    helium.write(password, into="パスワード")
-    helium.click("ログイン")
+    logging.info(f"Navigating to Money Forward login page: {login_url}")
+    
+    helium.start_firefox() 
+    helium.go_to(login_url)
 
-    helium.wait_until(helium.Button("手入力").exists)
+    logging.info(f"Attempting to login with email: {email}")
+
+    try:
+        # Step 1: Enter email (Subtask 9)
+        logging.info("Waiting for email field 'メールアドレス' to exist.")
+        helium.wait_until(helium.TextField("メールアドレス").exists, timeout_secs=15)
+        logging.info("Writing email into 'メールアドレス' field.")
+        helium.write(email, into=helium.TextField("メールアドレス"))
+
+        # "Keep me logged in" checkbox (Subtask 5 / refined in Subtask 11)
+        remember_me_checkbox_label = "次回から自動的にログインする"
+        try:
+            logging.info(f"Attempting to find and click '{remember_me_checkbox_label}' checkbox on email page.")
+            checkbox_element = helium.CheckBox(remember_me_checkbox_label)
+            if checkbox_element.exists():
+                if not checkbox_element.is_checked():
+                    logging.info(f"Clicking '{remember_me_checkbox_label}' checkbox.")
+                    helium.click(checkbox_element)
+                else:
+                    logging.info(f"'{remember_me_checkbox_label}' checkbox already checked.")
+            else:
+                logging.info(f"'{remember_me_checkbox_label}' checkbox not found by label.")
+        except Exception as e:
+            logging.warning(f"An error occurred while trying to interact with '{remember_me_checkbox_label}' checkbox on email page: {e}")
+        
+        # First login button (Subtask 9)
+        first_login_button_selectors = [
+            helium.Button("ログインする"), 
+            helium.S("#submitto"), 
+            helium.S('input[type="submit"][value="上記に同意してメールアドレスでログイン"]'),
+            helium.S('input[type="submit"][value="同意してメールアドレスを登録"]'),
+            helium.S('input[type="submit"].btn.btn-primary.btn-block')
+        ]
+        clicked_first_button = False
+        for selector in first_login_button_selectors:
+            if selector.exists():
+                logging.info(f"Found first login button with selector: {selector}")
+                helium.click(selector)
+                clicked_first_button = True
+                break
+        if not clicked_first_button:
+            logging.error("Could not find the first login button (after email submission).")
+            raise Exception("First login button not found after email submission.")
+
+        # Wait for password page (Subtask 9)
+        logging.info("Email submitted. Waiting for password page to load (expecting 'パスワード' field).")
+        helium.wait_until(helium.TextField("パスワード").exists, timeout_secs=15) 
+        
+        # Step 2: Enter password (Subtask 9)
+        logging.info("Writing password into 'パスワード' field.")
+        helium.write(password, into=helium.TextField("パスワード"))
+        
+        # Second login button (Subtask 9)
+        second_login_button_selectors = [
+            helium.Button("ログインする"),
+            helium.S("#submitto"),
+            helium.S('input[type="submit"][value="ログインする"].btn.btn-primary.btn-block'),
+            helium.S('input[type="submit"][value="ログインする"]')
+        ]
+        clicked_second_button = False
+        for selector in second_login_button_selectors:
+            if selector.exists():
+                logging.info(f"Found second login button with selector: {selector}")
+                helium.click(selector)
+                clicked_second_button = True
+                break
+        if not clicked_second_button:
+            logging.error("Could not find the second login button (after password submission).")
+            raise Exception("Second login button not found after password submission.")
+
+        logging.info("Password submitted. Waiting for main page content (手入力 button).")
+        
+        # 2FA handling logic (Subtask 12)
+        try:
+            helium.wait_until(helium.Button("手入力").exists, timeout_secs=10) 
+            logging.info("Successfully logged in (found '手入力' button quickly).")
+            return 
+        except Exception: 
+            logging.info("'手入力' button not found with short timeout. Checking for 2FA page.")
+            if is_2fa_page_detected(): 
+                logging.info("2FA page detected. Attempting to handle 2FA.")
+                handle_2fa_authentication() 
+                logging.info("2FA handling complete. Waiting for '手入力' button again with longer timeout.")
+                helium.wait_until(helium.Button("手入力").exists, timeout_secs=30) 
+                logging.info("Successfully logged in after 2FA handling.")
+                return 
+            else:
+                logging.info("2FA page not detected. Waiting for '手入力' with longer timeout or failing.")
+                helium.wait_until(helium.Button("手入力").exists, timeout_secs=30) 
+                logging.info("Successfully logged in (found '手入力' button after longer wait, no 2FA detected).")
+                return
+
+    except Exception as e:
+        logging.error(f"An error occurred during login: {e}")
+        logging.info("Browser was running or an error occurred during login, attempting to close it.")
+        helium.kill_browser() 
+        raise 
 
 
 def add_mf_record(dt: datetime, amount: int, store: str, asset_name: str, store_info: dict | None):
