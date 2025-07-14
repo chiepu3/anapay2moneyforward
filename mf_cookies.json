@@ -1,0 +1,70 @@
+[
+  {
+    "name": "icma",
+    "value": "true",
+    "path": "/",
+    "domain": "id.moneyforward.com",
+    "secure": false,
+    "httpOnly": false,
+    "sameSite": "None"
+  },
+  {
+    "name": "_moneybook_session",
+    "value": "H73Boc14tVfb725HdKy9SxGQ3YPLGR80C4MYDRtZHuzlcMtdrNt2HD9WcbgiLUBo7TxwZBwh7%2F5DOXt%2FlXfhTWVRj11ipkK5zWSNqcuoaKe3GRxhb%2BOswkvAFbpG22EyEbMkqoGpU7Jmz6Eps7tqzcNAFvaY6HKvFjV7fZddvyUgdgexM7EzjAmf%2FT%2FHFXipFYoUdPt62gstdMkMYGYBfSMHxvwOl3GP1Sb5z05FC7h%2FE%2FR8jmt3GftLdyCV4p0XYf3llmOPyyMzP6mBXyYgj0bVoex6cJAyGVLIDeACebk7i7%2FGbsB3%2BEVsyp0B3SiYhPGOYVCrP4GOMtitrEVGIFXyeCGLkJQ2DoKWFXJsYUjMSDEbluJHh3UQQhGTpZJ7Uf9lpLQ0XIFo4vO6lnmR6l2w6j5%2BUOwC6rhypVvdoMHRUdlJ8bAO5UXqMXcUZ%2BAMBpE%2Bh3mx1PAD2py221frTUhucjiYFHlUZwf7ruXDfX2399qsu9PXrrPm2YNrKrgvusNlad7ih1XUrLt4AOlbVnG9w61IHBYXS3f3wfF8Xn3nrZdc66kwlMF4xW2jOPAktv6jYOWfmHXHO2vRyIjjN7El3wFqmtk%2FZZupJ96eyMfPReikY%2BrcvfxsRZwORfiuguMP37TiSLlZ%2FjLYCsupNdjOnHQj3F3lqO9ipciZDM5LvXhz7%2BtE8PY60Byec1kfQ6fyuXFpCGQysbhIKhIQnEE9r30o1GMpnVdhqNDSUh83u7XBKhV2%2FkT4qSa4%2BWodiLs595tL3kEjgEGelSYR2YrIGkAiEojV7vLSc3N43S4seJtfUCX1qtfMNj%2BNX4tsnrujzbcLpl6MoSDsO2T1Nv073tau%2FsZWEe35xv2LPLKT7PPk7yYqnEvadbnZQWKoUJuUAed3ETJHWD8PLlPQpdS2r9%2FIsL68GJJ25dIWp4qQBWpYve1zXmiCltNqByPo%2FARxUidwvWo%3D--BdSgjGVd%2F8cXAzaF--mI0rp9Us7ezXnO4STqK4XQ%3D%3D",
+    "path": "/",
+    "domain": "moneyforward.com",
+    "secure": true,
+    "httpOnly": true,
+    "expiry": 1779882763,
+    "sameSite": "Lax"
+  },
+  {
+    "name": "_mfid_session",
+    "value": "ee7c2decaf31d526bb344c12daccdf9b",
+    "path": "/",
+    "domain": "id.moneyforward.com",
+    "secure": true,
+    "httpOnly": true,
+    "expiry": 1750938763,
+    "sameSite": "None"
+  },
+  {
+    "name": "last_used_application",
+    "value": "F1qjbjOyp5uKe2%2BzoSahhE25DFY%2BmffKhzFu3Jl6mHyTYe3Xrtp9wbBKb9aP9PoNJFxYpuO8cxqDlJ3%2BVSuOO0LDv%2BUt5ylA1eOSUX6m7tTvhs4n9MJ11ljJu3LClxMaxr6zmeN47RYmhkIbvejBNE7zyLDZ%2FwFKHSuqzVkF6tZrrEibJA%3D%3D--lVzfjwEeNQSOvNnV--wr34Y1ObwJktpTAsKHLPHg%3D%3D",
+    "path": "/",
+    "domain": "id.moneyforward.com",
+    "secure": true,
+    "httpOnly": true,
+    "sameSite": "None"
+  },
+  {
+    "name": "_ga",
+    "value": "GA1.1.2054861948.1748346762",
+    "path": "/",
+    "domain": ".moneyforward.com",
+    "secure": false,
+    "httpOnly": false,
+    "expiry": 1782906763,
+    "sameSite": "None"
+  },
+  {
+    "name": "_ga_6E1YP5DKBQ",
+    "value": "GS2.1.s1748346761$o1$g1$t1748346763$j0$l0$h0",
+    "path": "/",
+    "domain": ".moneyforward.com",
+    "secure": false,
+    "httpOnly": false,
+    "expiry": 1782906763,
+    "sameSite": "None"
+  },
+  {
+    "name": "_fbp",
+    "value": "fb.1.1748346761950.714303931211902669",
+    "path": "/",
+    "domain": ".moneyforward.com",
+    "secure": false,
+    "httpOnly": false,
+    "expiry": 1756122763,
+    "sameSite": "None"
+  }
+]
