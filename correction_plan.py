@@ -368,12 +368,36 @@ def build_correction_plan(
         receive_rows = item.target_evidence.get("receive_rows")
         if not isinstance(receive_rows, (list, tuple)) or len(receive_rows) != item.target_receive_count:
             errors.append(f"item {index}: target receive row evidence is required for every receive")
-        elif item.target_remote_id not in {
-            _text(row.get("remote_id") or row.get("id"))
-            for row in receive_rows
-            if isinstance(row, Mapping)
-        }:
-            errors.append(f"item {index}: target receive row evidence identity is missing")
+        else:
+            proven_ids: set[str] = set()
+            for row in receive_rows:
+                if not isinstance(row, Mapping):
+                    errors.append(f"item {index}: target receive row evidence is invalid")
+                    continue
+                row_id = _row_id(row)
+                if not row_id or row_id in proven_ids:
+                    errors.append(f"item {index}: target receive row identity is missing or duplicated")
+                proven_ids.add(row_id)
+                if isinstance(receive_ids, (list, tuple)) and row_id not in normalized_receive_ids:
+                    errors.append(f"item {index}: target receive row identity is not declared")
+                if _text(row.get("asset_name")) != item.target_asset:
+                    errors.append(f"item {index}: target receive row asset does not match evidence")
+                if _text(row.get("message_id")) != item.target_message_id:
+                    errors.append(f"item {index}: target receive row message identity does not match evidence")
+                try:
+                    row_date = _row_date(row)
+                    row_amount = _row_amount(row)
+                except (TypeError, ValueError):
+                    errors.append(f"item {index}: target receive row date or amount is invalid")
+                else:
+                    if row_date != item.date:
+                        errors.append(f"item {index}: target receive row date does not match evidence")
+                    if row_amount != item.amount:
+                        errors.append(f"item {index}: target receive row amount does not match evidence")
+            if item.target_remote_id not in proven_ids:
+                errors.append(f"item {index}: target receive row evidence identity is missing")
+        if _text(item.target_evidence.get("message_id")) != item.target_message_id:
+            errors.append(f"item {index}: target message identity does not match evidence")
         source_proof = item.source_evidence
         if _text(source_proof.get("asset_name")) != item.source_asset:
             errors.append(f"item {index}: source asset evidence does not match source asset")
@@ -648,15 +672,12 @@ class CorrectionExecutor:
         # separate account-balance UI read before any action status is known.
         if plan.status is CorrectionPlanStatus.BLOCKED:
             return CorrectionRunReport(CorrectionRunStatus.BLOCKED, plan.plan_id, {}, "; ".join(plan.errors), {}, {})
-        if execute_live and any(
-            action.kind is CorrectionActionKind.BALANCE_COMPENSATION and action.audit_only
-            for action in plan.actions
-        ):
+        if execute_live and any(action.audit_only for action in plan.actions):
             return CorrectionRunReport(
                 CorrectionRunStatus.BLOCKED,
                 plan.plan_id,
                 {action.action_id: "blocked" for action in plan.actions},
-                "aggregate compensation evidence is audit-only; live apply is unsupported",
+                "audit-only action cannot be executed live",
                 {},
                 {},
                 0,
@@ -718,7 +739,7 @@ class CorrectionExecutor:
         preflight_snapshots: dict[str, Mapping[str, Any]] = {}
         preflight_failures: list[tuple[str, str, str]] = []
         for action in plan.actions:
-            if action.kind is CorrectionActionKind.BALANCE_COMPENSATION and action.audit_only:
+            if action.audit_only:
                 statuses[action.action_id] = "blocked"
                 reason = f"audit-only action cannot be executed live: {action.action_id}"
                 self.audit.append(self._event(plan.plan_id, action, "blocked", reason=reason))

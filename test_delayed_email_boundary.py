@@ -1,10 +1,13 @@
 # Test inputs are entirely synthetic and do not encode a deployment boundary.
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone, tzinfo
+
+import pytest
 
 from delayed_email_boundary import (
     BOUNDARY_TIME_UNKNOWN_REASON,
     BOUNDARY_CONFIG_INVALID_REASON,
     MISSING_DATE_REASON,
+    USAGE_TIME_UNKNOWN_REASON,
     NEEDS_REVIEW,
     STALE_REASON,
     BoundaryDecision,
@@ -47,7 +50,7 @@ def test_boundary_day_without_usage_time_is_quarantined():
         {"asset_name": "fixture-wallet-a", "date_of_use": date(2000, 1, 2)}, boundary()
     )
     assert decision.status == NEEDS_REVIEW
-    assert decision.reason == BOUNDARY_TIME_UNKNOWN_REASON
+    assert decision.reason == USAGE_TIME_UNKNOWN_REASON
 
 
 def test_date_only_string_is_not_promoted_to_midnight_time():
@@ -55,7 +58,7 @@ def test_date_only_string_is_not_promoted_to_midnight_time():
         {"asset_name": "fixture-wallet-a", "date_of_use": "2000-01-02"}, boundary()
     )
     assert decision.status == NEEDS_REVIEW
-    assert decision.reason == BOUNDARY_TIME_UNKNOWN_REASON
+    assert decision.reason == USAGE_TIME_UNKNOWN_REASON
 
 
 def test_boundary_date_only_with_time_known_true_is_rejected():
@@ -75,11 +78,11 @@ def test_boundary_day_with_unknown_boundary_time_is_quarantined():
     assert decision.status == NEEDS_REVIEW
 
 
-def test_later_day_is_allowed_even_if_time_is_not_present():
+def test_later_day_without_time_is_reviewed():
     decision = evaluate_delayed_email_boundary(
         {"asset_name": "fixture-wallet-a", "date_of_use": "2000-01-03"}, boundary()
     )
-    assert decision.status == "allow"
+    assert decision == BoundaryDecision(NEEDS_REVIEW, USAGE_TIME_UNKNOWN_REASON)
 
 
 def test_boundary_timestamp_allows_at_or_after_event():
@@ -279,7 +282,7 @@ def test_index_mapping_is_compacted_after_exclusions():
             },
             {
                 "asset_name": "fixture-wallet-a",
-                "date_of_use": "2000-01-03",
+                "date_of_use": "2000-01-03T12:00:00",
                 "provider": "fixture-provider",
                 "message_id": "safe",
                 "sync_status": "pending",
@@ -290,3 +293,97 @@ def test_index_mapping_is_compacted_after_exclusions():
     )
     assert [row["message_id"] for row in result.records] == ["safe"]
     assert result.index_mapping == {0: 12}
+
+
+@pytest.mark.parametrize("value", ["20000102", "2000-01-02", "2000/01/02", "1999-W52-7", "1999W527", date(2000, 1, 2)])
+def test_date_only_formats_are_not_known_midnight(value):
+    decision = evaluate_delayed_email_boundary(
+        {"asset_name": "fixture-wallet-a", "date_of_use": value},
+        {"fixture-wallet-a": VerifiedBalanceBoundary(datetime(2000, 1, 2), True)},
+    )
+    assert decision.status == NEEDS_REVIEW
+
+
+def test_later_date_without_usage_time_still_requires_review():
+    decision = evaluate_delayed_email_boundary(
+        {"asset_name": "fixture-wallet-a", "date_of_use": "20000103"},
+        {"fixture-wallet-a": VerifiedBalanceBoundary(datetime(2000, 1, 2), True)},
+    )
+    assert decision.status == NEEDS_REVIEW
+
+
+@pytest.mark.parametrize("value", ["20000102T000000", "2000-01-02T00:00:00", datetime(2000, 1, 2)])
+def test_explicit_midnight_is_known_time(value):
+    decision = evaluate_delayed_email_boundary(
+        {"asset_name": "fixture-wallet-a", "date_of_use": value},
+        {"fixture-wallet-a": VerifiedBalanceBoundary(datetime(2000, 1, 2), True)},
+    )
+    assert decision.status == "allow"
+
+
+@pytest.mark.parametrize("used, boundary_value, expected", [
+    ("2000-01-03T00:00:00+14:00", "2000-01-02T12:00:00+00:00", NEEDS_REVIEW),
+    ("2000-01-01T23:30:00-02:00", "2000-01-02T00:00:00+00:00", "allow"),
+    ("2000-01-03T12:00:00", "2000-01-02T12:00:00+00:00", NEEDS_REVIEW),
+    ("2000-01-03T12:00:00+00:00", "2000-01-02T12:00:00", NEEDS_REVIEW),
+])
+def test_cross_day_timezone_ordering_uses_instants_or_fails_closed(used, boundary_value, expected):
+    decision = evaluate_delayed_email_boundary(
+        {"asset_name": "fixture-wallet-a", "date_of_use": used},
+        {"fixture-wallet-a": VerifiedBalanceBoundary(boundary_value, True)},
+    )
+    assert decision.status == expected
+
+
+class FixtureFoldZone(tzinfo):
+    def utcoffset(self, value):
+        return timedelta(hours=-5 if value.fold else -4)
+
+    def dst(self, value):
+        return timedelta(0)
+
+    def tzname(self, value):
+        return "fixture-fold-zone"
+
+
+def test_same_timezone_fold_is_compared_in_utc():
+    zone = FixtureFoldZone()
+    used = datetime(2000, 1, 2, 1, 30, tzinfo=zone, fold=0)
+    later_boundary = datetime(2000, 1, 2, 1, 30, tzinfo=zone, fold=1)
+    decision = evaluate_delayed_email_boundary(
+        {"asset_name": "fixture-wallet-a", "date_of_use": used},
+        {"fixture-wallet-a": VerifiedBalanceBoundary(later_boundary, True)},
+    )
+    assert decision == BoundaryDecision(NEEDS_REVIEW, STALE_REASON)
+
+
+@pytest.mark.parametrize("status", ["pending", "needs_review", "applying", "applied"])
+def test_date_only_pending_states_are_excluded_when_boundary_applies(status):
+    result = filter_moneyforward_sync_candidates(
+        [{
+            "asset_name": "fixture-wallet-a",
+            "date_of_use": "20000102",
+            "provider": "fixture-provider",
+            "message_id": "fixture-candidate",
+            "sync_status": status,
+        }],
+        {"fixture-wallet-a": VerifiedBalanceBoundary(datetime(2000, 1, 2), True)},
+    )
+    assert result.records == ()
+    assert result.excluded_reasons == (USAGE_TIME_UNKNOWN_REASON,)
+
+
+def test_compact_date_only_boundary_is_not_a_known_midnight():
+    decision = evaluate_delayed_email_boundary(
+        {"asset_name": "fixture-wallet-a", "date_of_use": "2000-01-02T00:00:00"},
+        {"fixture-wallet-a": "20000102"},
+    )
+    assert decision == BoundaryDecision(NEEDS_REVIEW, BOUNDARY_TIME_UNKNOWN_REASON)
+
+
+def test_compact_date_only_boundary_cannot_claim_known_time():
+    decision = evaluate_delayed_email_boundary(
+        {"asset_name": "fixture-wallet-a", "date_of_use": "2000-01-02T00:00:00"},
+        {"fixture-wallet-a": VerifiedBalanceBoundary("20000102", True)},
+    )
+    assert decision == BoundaryDecision(NEEDS_REVIEW, BOUNDARY_CONFIG_INVALID_REASON)

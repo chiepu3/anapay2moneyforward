@@ -7,7 +7,7 @@ is absent from the map is not classified by this guard.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from collections.abc import Mapping, MutableMapping
 from typing import Any
 
@@ -17,6 +17,7 @@ VERIFIED = "verified"
 REMOVED_DUPLICATE = "removed_duplicate"
 STALE_REASON = "残高照合境界より前の利用日の遅延メールのため要確認"
 MISSING_DATE_REASON = "利用日時を確認できないため要確認"
+USAGE_TIME_UNKNOWN_REASON = "利用時刻を確認できないため要確認"
 BOUNDARY_TIME_UNKNOWN_REASON = "残高照合境界当日の時刻が不明なため要確認"
 BOUNDARY_CONFIG_INVALID_REASON = "残高照合境界の設定を確認できないため要確認"
 IDENTITY_UNKNOWN_REASON = "同期対象の確定したメッセージ識別子がないため要確認"
@@ -97,20 +98,16 @@ def _parse(value: Any) -> tuple[date, datetime | None, bool] | None:
         return None
     # ``datetime.fromisoformat`` accepts a date-only string as midnight.  That
     # is not evidence that the event or boundary time is known.
-    if len(text) == 10 and text[4] in "-/" and text[7] in "-/":
-        try:
-            parsed_date = date.fromisoformat(text.replace("/", "-"))
-        except ValueError:
-            return None
+    try:
+        parsed_date = date.fromisoformat(text.replace("/", "-"))
+    except ValueError:
+        pass
+    else:
         return parsed_date, None, False
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
-        try:
-            parsed_date = date.fromisoformat(text.replace("/", "-"))
-        except ValueError:
-            return None
-        return parsed_date, None, False
+        return None
     return parsed.date(), parsed, True
 
 
@@ -144,6 +141,8 @@ def evaluate_delayed_email_boundary(
     if used is None:
         return BoundaryDecision(NEEDS_REVIEW, MISSING_DATE_REASON)
     used_day, used_timestamp, used_time_known = used
+    if not used_time_known or used_timestamp is None:
+        return BoundaryDecision(NEEDS_REVIEW, USAGE_TIME_UNKNOWN_REASON)
     for account in applicable:
         try:
             verified = _boundary(boundaries[account])
@@ -152,21 +151,37 @@ def evaluate_delayed_email_boundary(
         boundary_day, boundary_timestamp, _ = _parse(verified.boundary) or (None, None, False)
         if boundary_day is None:
             return BoundaryDecision(NEEDS_REVIEW, BOUNDARY_CONFIG_INVALID_REASON)
-        if used_day < boundary_day:
-            return BoundaryDecision(NEEDS_REVIEW, STALE_REASON)
-        if used_day > boundary_day:
-            continue
-        if not verified.time_known or not used_time_known:
-            return BoundaryDecision(NEEDS_REVIEW, BOUNDARY_TIME_UNKNOWN_REASON)
-        if boundary_timestamp is None or used_timestamp is None:
-            return BoundaryDecision(NEEDS_REVIEW, BOUNDARY_CONFIG_INVALID_REASON)
         try:
-            before_boundary = used_timestamp < boundary_timestamp
-        except TypeError:
-            # A timezone mismatch is not safe to order implicitly.
+            used_aware = used_timestamp.utcoffset() is not None
+            if boundary_timestamp is None:
+                if used_aware:
+                    return BoundaryDecision(NEEDS_REVIEW, BOUNDARY_CONFIG_INVALID_REASON)
+                comparable_day = used_day
+            else:
+                boundary_aware = boundary_timestamp.utcoffset() is not None
+                if used_aware != boundary_aware:
+                    return BoundaryDecision(NEEDS_REVIEW, BOUNDARY_CONFIG_INVALID_REASON)
+                if verified.time_known:
+                    if used_aware:
+                        before_boundary = (
+                            used_timestamp.astimezone(timezone.utc)
+                            < boundary_timestamp.astimezone(timezone.utc)
+                        )
+                    else:
+                        before_boundary = used_timestamp < boundary_timestamp
+                    if before_boundary:
+                        return BoundaryDecision(NEEDS_REVIEW, STALE_REASON)
+                    continue
+                comparable_day = (
+                    used_timestamp.astimezone(boundary_timestamp.tzinfo).date()
+                    if used_aware else used_day
+                )
+        except (TypeError, ValueError, OverflowError):
             return BoundaryDecision(NEEDS_REVIEW, BOUNDARY_CONFIG_INVALID_REASON)
-        if before_boundary:
+        if comparable_day < boundary_day:
             return BoundaryDecision(NEEDS_REVIEW, STALE_REASON)
+        if comparable_day == boundary_day:
+            return BoundaryDecision(NEEDS_REVIEW, BOUNDARY_TIME_UNKNOWN_REASON)
     return BoundaryDecision("allow")
 
 

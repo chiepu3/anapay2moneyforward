@@ -1,6 +1,7 @@
 # All dates, values, identities, and source labels below are synthetic fixtures.
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 
 import pytest
@@ -52,6 +53,7 @@ def evidence(*, income: str = "", suffix: str = "", target: str = "JAL Pay") -> 
             "receive_rows": [
                 {
                     "remote_id": f"receive-row-{suffix}",
+                    "message_id": f"target-message-{suffix}",
                     "date": "2000-01-01T12:00:00+09:00",
                     "amount": 7,
                     "asset_name": target,
@@ -304,7 +306,7 @@ def test_uncertain_readback_blocks_plan_and_compensation_is_not_executable(
 
 
 def test_live_preflight_reads_all_actions_before_any_apply_on_later_read_error():
-    plan = build_correction_plan([live_evidence(suffix="live-preflight-error")])
+    plan = synthetic_write_plan(suffix="live-preflight-error")
     adapter = FakeAdapter(plan)
     failing_action = plan.actions[1].action_id
     read_ids = []
@@ -326,7 +328,7 @@ def test_live_preflight_reads_all_actions_before_any_apply_on_later_read_error()
 
 
 def test_live_run_is_idempotent_and_rereads_after_unknown_save_outcome():
-    plan = build_correction_plan([live_evidence(suffix="live")])
+    plan = synthetic_write_plan(suffix="live")
     adapter = FakeAdapter(plan)
     first_action = plan.actions[0].action_id
     adapter.fail_after.add(first_action)
@@ -342,7 +344,7 @@ def test_live_run_is_idempotent_and_rereads_after_unknown_save_outcome():
 
 
 def test_live_run_converts_save_readback_exception_to_unknown():
-    plan = build_correction_plan([live_evidence(suffix="read-exception")])
+    plan = synthetic_write_plan(suffix="read-exception")
     adapter = FakeAdapter(plan)
     target_action = plan.actions[0].action_id
     original_read = adapter.read_action
@@ -360,7 +362,7 @@ def test_live_run_converts_save_readback_exception_to_unknown():
 
 
 def test_partial_failure_can_resume_without_reapplying_completed_actions():
-    plan = build_correction_plan([live_evidence(suffix="resume")])
+    plan = synthetic_write_plan(suffix="resume")
     adapter = FakeAdapter(plan)
     adapter.fail_before.add(plan.actions[1].action_id)
     first = CorrectionExecutor(adapter, dry_run=False).run(plan)
@@ -373,7 +375,7 @@ def test_partial_failure_can_resume_without_reapplying_completed_actions():
 
 
 def test_balance_invariant_blocks_on_unexpected_balance_change():
-    plan = build_correction_plan([live_evidence(suffix="balance")])
+    plan = synthetic_write_plan(suffix="balance")
     adapter = FakeAdapter(plan)
     adapter.corrupt_after = True
     report = CorrectionExecutor(adapter, dry_run=False).run(plan)
@@ -382,7 +384,7 @@ def test_balance_invariant_blocks_on_unexpected_balance_change():
 
 
 def test_live_balance_read_exception_is_unknown_without_writes():
-    plan = build_correction_plan([live_evidence(suffix="balance-read-error")])
+    plan = synthetic_write_plan(suffix="balance-read-error")
     adapter = FakeAdapter(plan)
 
     def fail_balance_read(asset):
@@ -397,7 +399,7 @@ def test_live_balance_read_exception_is_unknown_without_writes():
 
 
 def test_live_postwrite_balance_read_exception_is_unknown_after_verified_rows():
-    plan = build_correction_plan([live_evidence(suffix="postwrite-balance")])
+    plan = synthetic_write_plan(suffix="postwrite-balance")
     adapter = FakeAdapter(plan)
     calls = 0
     original_read_balance = adapter.read_balance
@@ -414,3 +416,96 @@ def test_live_postwrite_balance_read_exception_is_unknown_after_verified_rows():
     assert report.status is CorrectionRunStatus.UNKNOWN
     assert "balance read failed" in report.blocked_reason
     assert report.writes_attempted == 3
+
+
+def synthetic_write_plan(*, suffix="fixture"):
+    """Exercise executor mechanics only with FakeAdapter, not real adapters."""
+
+    plan = build_correction_plan([live_evidence(suffix=suffix)])
+    assert plan.status is CorrectionPlanStatus.READY
+    return replace(
+        plan,
+        plan_id=f"fixture-write-plan-{suffix}",
+        actions=tuple(replace(action, audit_only=False) for action in plan.actions),
+    )
+
+
+@pytest.mark.parametrize("kind", list(CorrectionActionKind))
+def test_every_audit_only_kind_blocks_live_before_reads_or_writes(kind):
+    plan = synthetic_write_plan(suffix="audit-kind")
+    audited = replace(plan.actions[0], kind=kind, audit_only=True)
+    plan = replace(plan, actions=(audited, *plan.actions[1:]))
+    adapter = FakeAdapter(plan)
+    balance_reads = []
+    original_read = adapter.read_balance
+
+    def read_balance(asset):
+        balance_reads.append(asset)
+        return original_read(asset)
+
+    adapter.read_balance = read_balance
+    report = CorrectionExecutor(adapter, dry_run=False).run(plan)
+    assert report.status is CorrectionRunStatus.BLOCKED
+    assert report.writes_attempted == 0
+    assert adapter.apply_calls == 0
+    assert balance_reads == []
+
+
+@pytest.mark.parametrize("field, value", [
+    ("date", "2000-01-03T12:00:00+09:00"),
+    ("amount", 11),
+    ("asset_name", "fixture-wrong-wallet"),
+    ("message_id", "fixture-wrong-message"),
+])
+def test_contradictory_receive_row_evidence_blocks_plan(field, value):
+    item = evidence(suffix="contradiction")
+    target = dict(item.target_evidence)
+    row = dict(target["receive_rows"][0], message_id=item.target_message_id)
+    row[field] = value
+    target["receive_rows"] = [row]
+    plan = build_correction_plan([replace(item, target_evidence=target)])
+    assert plan.status is CorrectionPlanStatus.BLOCKED
+    assert plan.actions == ()
+
+
+@pytest.mark.parametrize("field", ["date", "amount", "asset_name", "message_id"])
+def test_missing_receive_row_evidence_blocks_plan(field):
+    item = evidence(suffix="missing-row-proof")
+    target = dict(item.target_evidence)
+    row = dict(target["receive_rows"][0], message_id=item.target_message_id)
+    row.pop(field)
+    target["receive_rows"] = [row]
+    plan = build_correction_plan([replace(item, target_evidence=target)])
+    assert plan.status is CorrectionPlanStatus.BLOCKED
+    assert plan.actions == ()
+
+
+def test_contradictory_target_message_evidence_blocks_plan():
+    item = evidence(suffix="target-message")
+    target = dict(item.target_evidence, message_id="fixture-wrong-message")
+    target["receive_rows"] = [dict(target["receive_rows"][0], message_id=item.target_message_id)]
+    plan = build_correction_plan([replace(item, target_evidence=target)])
+    assert plan.status is CorrectionPlanStatus.BLOCKED
+    assert plan.actions == ()
+
+
+def test_equivalent_receive_timezone_is_accepted():
+    item = evidence(suffix="equivalent-time")
+    target = dict(item.target_evidence)
+    target["receive_rows"] = [dict(
+        target["receive_rows"][0],
+        message_id=item.target_message_id,
+        date="2000-01-01T03:00:00+00:00",
+    )]
+    assert build_correction_plan([replace(item, target_evidence=target)]).status is CorrectionPlanStatus.READY
+
+
+def test_built_audit_plan_cannot_be_applied_with_live_override():
+    plan = build_correction_plan([live_evidence(suffix="built-audit-plan")])
+    assert plan.status is CorrectionPlanStatus.READY
+    assert any(action.audit_only for action in plan.actions)
+    adapter = FakeAdapter(plan)
+    report = CorrectionExecutor(adapter, dry_run=True).run(plan, dry_run=False)
+    assert report.status is CorrectionRunStatus.BLOCKED
+    assert report.writes_attempted == 0
+    assert adapter.apply_calls == 0
