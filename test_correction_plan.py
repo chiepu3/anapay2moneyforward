@@ -500,6 +500,40 @@ def test_equivalent_receive_timezone_is_accepted():
     assert build_correction_plan([replace(item, target_evidence=target)]).status is CorrectionPlanStatus.READY
 
 
+@pytest.mark.parametrize("field", ["remote_id", "message_id", "asset_name"])
+def test_conflicting_receive_proof_cannot_reach_executor(field):
+    item = evidence(suffix="conflicting-proof")
+    target = dict(item.target_evidence)
+    target["receive_rows"] = [dict(target["receive_rows"][0], **{field: "fixture-conflict"})]
+    plan = build_correction_plan([replace(item, target_evidence=target)])
+    assert plan.status is CorrectionPlanStatus.BLOCKED
+    assert plan.actions == ()
+    adapter = FakeAdapter(plan)
+    report = CorrectionExecutor(adapter, dry_run=False).run(plan)
+    assert report.status is CorrectionRunStatus.BLOCKED
+    assert report.writes_attempted == 0
+    assert adapter.apply_calls == 0
+
+
+@pytest.mark.parametrize("kind", list(CorrectionActionKind))
+def test_last_audit_only_action_blocks_entire_plan_before_adapter_calls(kind):
+    plan = synthetic_write_plan(suffix="late-audit")
+    audited = replace(plan.actions[-1], kind=kind, audit_only=True)
+    plan = replace(plan, actions=(*plan.actions[:-1], audited))
+    adapter = FakeAdapter(plan)
+
+    def forbidden_read(*args):
+        raise AssertionError("audit-only plan must stop before adapter reads")
+
+    adapter.read_action = forbidden_read
+    adapter.read_balance = forbidden_read
+    report = CorrectionExecutor(adapter, dry_run=False).run(plan)
+    assert report.status is CorrectionRunStatus.BLOCKED
+    assert report.writes_attempted == 0
+    assert adapter.apply_calls == 0
+    assert set(report.action_statuses.values()) == {"blocked"}
+
+
 def test_built_audit_plan_cannot_be_applied_with_live_override():
     plan = build_correction_plan([live_evidence(suffix="built-audit-plan")])
     assert plan.status is CorrectionPlanStatus.READY
